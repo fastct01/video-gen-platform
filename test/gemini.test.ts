@@ -29,3 +29,34 @@ describe('gemini response parsing', () => {
     expect(parseFileId('https://example.com/video.mp4')).toBeNull();
   });
 });
+
+describe('GeminiProvider request', () => {
+  it('sends store=true whenever delivery is "uri" (the API rejects store=false with uri delivery)', async () => {
+    const { createServer } = await import('node:http');
+    const { GeminiProvider } = await import('../src/providers/gemini.js');
+    let body: any;
+    let key: string | undefined;
+    const server = createServer((req, res) => {
+      let raw = '';
+      req.on('data', (c) => (raw += c));
+      req.on('end', () => {
+        body = JSON.parse(raw);
+        key = String(req.headers['x-goog-api-key']);
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ status: 'completed', outputs: [{ type: 'video', data: Buffer.from('mp4').toString('base64') }] }));
+      });
+    });
+    await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
+    const port = (server.address() as { port: number }).port;
+    try {
+      const p = new GeminiProvider({ apiKey: 'AIza-test', model: 'm', baseUrl: `http://127.0.0.1:${port}`, tokensPerSecond: 0, requestTimeoutMs: 10_000 });
+      const r = await p.generate({ prompt: 'x', durationSeconds: 4, aspectRatio: '16:9', resolution: '720p' } as any);
+      expect(r.state).toBe('completed');
+      expect(key).toBe('AIza-test');
+      expect(body.response_format.delivery).toBe('uri');
+      expect(body.store).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+});

@@ -76,8 +76,9 @@ export class GeminiProvider implements VideoProvider {
         resolution: req.resolution,
         delivery: 'uri',
       },
-      // We never edit a clip in a later turn, so there's no reason for Google to keep the interaction.
-      store: false,
+      // Required by the API: video delivery "uri" is rejected with store=false
+      // ("store=true is required when response format has video delivery set to URI").
+      store: true,
     };
 
     let res;
