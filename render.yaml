@@ -5,6 +5,7 @@ services:
   - type: web
     name: video-studio
     runtime: docker
+    region: frankfurt        # all three resources must share a region to talk over Render's private network
     plan: starter            # persistent disks need a paid instance
     healthCheckPath: /health
     disk:
@@ -46,12 +47,14 @@ services:
 
   - type: keyvalue
     name: video-studio-queue
+    region: frankfurt
     plan: starter
     maxmemoryPolicy: noeviction  # required by BullMQ: queue data must never be evicted
     ipAllowList: []              # reachable only from your Render services
 
 databases:
   - name: video-studio-db
+    region: frankfurt
     plan: basic-256mb
     databaseName: video
     user: video
