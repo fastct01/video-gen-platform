@@ -4,17 +4,17 @@ import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { z } from 'zod';
 import { config } from '../../config.js';
 import { creditTokens, getBalance } from '../../db/billing.js';
-import { pool } from '../../db/pool.js';
+import { pool, withTx } from '../../db/pool.js';
+import { deriveLoginKey } from '../../lib/crypto.js';
 import { errMsg, newApiKey, sha256 } from '../../lib/util.js';
-import { listProviders, setGeminiKey } from '../../providers/registry.js';
-import { GEMINI_KEY_SETTING, setSetting } from '../../providers/settings.js';
+import { keyHint, setUserGeminiKey, userGeminiKey } from '../../providers/user-keys.js';
 import { ApiError } from '../../services/videos.js';
 
 // Resolves to <project>/public/index.html from both src/api/routes (tsx) and dist/api/routes (built).
 const INDEX_HTML = new URL('../../../public/index.html', import.meta.url);
 
-/** The account the browser UI uses when it's connected with a provider key or the admin token. */
-const LOCAL_USER_EMAIL = 'you@localhost.local';
+/** The admin's own UI account, used when someone signs in to the UI with ADMIN_TOKEN. */
+const ADMIN_UI_EMAIL = 'you@localhost.local';
 
 const connectBody = z.object({ key: z.string().trim().min(1, 'paste a key').max(1000) });
 
@@ -23,7 +23,7 @@ interface User {
   email: string;
 }
 
-/** Serves the browser UI and lets it connect with whatever key the user has. */
+/** Serves the browser UI and signs people in with whatever key they have. */
 export async function uiRoutes(app: FastifyInstance) {
   app.get('/', async (_req, reply) => {
     // Read on every request so edits to the page show up without restarting the server.
@@ -34,14 +34,17 @@ export async function uiRoutes(app: FastifyInstance) {
 
   /**
    * Takes any key and works out what it is:
-   *   1. a Video Studio user key (vk_...)  -> use it as is
-   *   2. the ADMIN_TOKEN                   -> sign in as the local user
-   *   3. a Gemini API key (checked live with Google) -> saved for every process, sign in as the local user
+   *   1. a Video Studio user key (vk_...)  -> signs in to that account
+   *   2. the ADMIN_TOKEN                   -> signs in to the admin's UI account
+   *   3. a Gemini API key (checked live with Google) -> signs in to the account that owns that key, creating it
+   *      on first use. If you're already signed in, the key is attached to your current account instead.
+   *      The key is stored encrypted and only ever used for that account's videos.
    * Returns the user API key the browser should send as `Authorization: Bearer` (null = keep the current one).
-   * Only accepted from this machine, because it can save provider keys and mint a user key.
    */
   app.post('/ui/connect', async (req) => {
-    if (!isLoopback(req.ip)) throw new ApiError(403, 'forbidden', 'keys can only be connected from the machine running the server');
+    if (!connectLimiter.allow(req.ip)) {
+      throw new ApiError(429, 'rate_limited', 'too many attempts — wait a few minutes and try again');
+    }
     const { key } = connectBody.parse(req.body);
     if (!/^[\x21-\x7e]+$/.test(key)) {
       throw new ApiError(400, 'invalid_key', 'that key contains spaces or unusual characters — copy it again without extra text');
@@ -52,16 +55,14 @@ export async function uiRoutes(app: FastifyInstance) {
     if (owner) return result('user', 'Video Studio key', key, owner);
 
     if (safeEqual(key, config.ADMIN_TOKEN)) {
-      const s = await session(current);
+      const s = current ? { apiKey: null, user: current } : await adminSession();
       return result('admin', 'Admin token', s.apiKey, s.user);
     }
 
     const looksGemini = /^AIza[\w-]{30,}$/.test(key);
     const check = await verifyGeminiKey(key);
     if (check.ok) {
-      await setSetting(GEMINI_KEY_SETTING, key);
-      setGeminiKey(key); // this process now; workers pick it up from app_settings within a few seconds
-      const s = await session(current);
+      const s = await geminiSession(key, current);
       return result('gemini', 'Gemini API key', s.apiKey, s.user);
     }
     // Never log the key itself, only what Google said about it.
@@ -82,32 +83,61 @@ export async function uiRoutes(app: FastifyInstance) {
 }
 
 async function result(kind: 'user' | 'admin' | 'gemini', label: string, apiKey: string | null, user: User) {
-  return {
-    kind,
-    label,
-    apiKey,
-    email: user.email,
-    balance: await getBalance(user.id),
-    providers: listProviders().map((p) => p.id),
-  };
+  const [balance, gemini] = await Promise.all([getBalance(user.id), userGeminiKey(user.id)]);
+  return { kind, label, apiKey, email: user.email, balance, geminiKey: gemini ? { hint: keyHint(gemini) } : null };
 }
 
-/** Keeps the signed-in user if there is one; otherwise signs in as the local user (issuing it a fresh key). */
-async function session(current: User | null): Promise<{ apiKey: string | null; user: User }> {
-  if (current) return { apiKey: null, user: current };
+/** Signs in to the admin's UI account, issuing it a fresh key. */
+async function adminSession(): Promise<{ apiKey: string; user: User }> {
   const apiKey = newApiKey();
   const r = await pool.query<User>(
     `INSERT INTO users (email, api_key_hash) VALUES ($1, $2)
      ON CONFLICT (email) DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash, updated_at = now()
      RETURNING id, email`,
-    [LOCAL_USER_EMAIL, sha256(apiKey)],
+    [ADMIN_UI_EMAIL, sha256(apiKey)],
   );
   const user = r.rows[0]!;
   if (config.LOCAL_USER_INITIAL_TOKENS > 0) {
-    // Idempotent per reference: the grant happens once, when the local user is first created.
-    await creditTokens({ userId: user.id, amount: config.LOCAL_USER_INITIAL_TOKENS, reference: `local-user-${user.id}`, note: 'local UI starting balance' });
+    // Idempotent per reference: the grant happens once, when the account is first created.
+    await creditTokens({ userId: user.id, amount: config.LOCAL_USER_INITIAL_TOKENS, reference: `local-user-${user.id}`, note: 'admin UI starting balance' });
   }
   return { apiKey, user };
+}
+
+/**
+ * Signs in with a verified Gemini key. The key identifies the account (by its hash), so the same key on
+ * another device opens the same account. Login key = deriveLoginKey(geminiKey), so it's the same everywhere.
+ */
+async function geminiSession(geminiKey: string, current: User | null): Promise<{ apiKey: string | null; user: User }> {
+  return withTx(async (c) => {
+    const found = await c.query<User>(`SELECT id, email FROM users WHERE gemini_key_hash = $1 FOR UPDATE`, [sha256(geminiKey)]);
+    const existing = found.rows[0];
+
+    if (existing && current?.id === existing.id) {
+      await setUserGeminiKey(existing.id, geminiKey, c); // re-encrypt (e.g. after ENCRYPTION_KEY changed)
+      return { apiKey: null, user: existing };
+    }
+    if (!existing && current) {
+      await setUserGeminiKey(current.id, geminiKey, c); // attach to the signed-in account
+      return { apiKey: null, user: current };
+    }
+
+    const apiKey = deriveLoginKey(geminiKey);
+    let user = existing;
+    if (user) {
+      await c.query(`UPDATE users SET api_key_hash = $2, updated_at = now() WHERE id = $1`, [user.id, sha256(apiKey)]);
+    } else {
+      const r = await c.query<User>(
+        `INSERT INTO users (email, api_key_hash) VALUES ($1, $2)
+         ON CONFLICT (email) DO UPDATE SET api_key_hash = EXCLUDED.api_key_hash, updated_at = now()
+         RETURNING id, email`,
+        [`gemini-${sha256(geminiKey).slice(0, 12)}@users.local`, sha256(apiKey)],
+      );
+      user = r.rows[0]!;
+    }
+    await setUserGeminiKey(user.id, geminiKey, c);
+    return { apiKey, user };
+  });
 }
 
 async function userByKey(key: string): Promise<User | null> {
@@ -119,6 +149,25 @@ async function userFromAuthHeader(req: FastifyRequest): Promise<User | null> {
   const key = /^Bearer\s+(\S+)$/i.exec(req.headers.authorization ?? '')?.[1];
   return key ? userByKey(key) : null;
 }
+
+/** Fixed-window limiter: stops the sign-in endpoint being used to guess keys or as a free Gemini-key checker. */
+const connectLimiter = (() => {
+  const WINDOW_MS = 10 * 60_000;
+  const MAX = 20;
+  const hits = new Map<string, { n: number; reset: number }>();
+  return {
+    allow(ip: string): boolean {
+      const now = Date.now();
+      if (hits.size > 10_000) for (const [k, v] of hits) if (v.reset < now) hits.delete(k);
+      const h = hits.get(ip);
+      if (!h || h.reset < now) {
+        hits.set(ip, { n: 1, reset: now + WINDOW_MS });
+        return true;
+      }
+      return ++h.n <= MAX;
+    },
+  };
+})();
 
 type GeminiCheck =
   | { ok: true }
@@ -202,10 +251,6 @@ function explainGeminiKeyError(httpStatus: number, g: GoogleError, raw: string):
     );
   }
   return `Google didn't accept this key: ${raw}${tag}`;
-}
-
-function isLoopback(ip: string): boolean {
-  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
 function safeEqual(a: string, b: string): boolean {

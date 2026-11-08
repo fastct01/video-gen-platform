@@ -29,19 +29,21 @@ export interface GeminiOptions {
   requestTimeoutMs: number;
 }
 
+export const GEMINI_CAPABILITIES = {
+  // Plain text-to-video allows 3-15 s, but image input (used for chaining) is limited to 3-10 s.
+  minSeconds: 3,
+  maxSeconds: 10,
+  aspectRatios: ['16:9', '9:16'] as ('16:9' | '9:16')[],
+  resolutions: ['360p', '720p', '1080p', '4k'],
+  defaultResolution: '720p',
+  imageToVideo: true,
+};
+
 export class GeminiProvider implements VideoProvider {
   readonly id = 'gemini';
   readonly defaultModel: string;
   readonly tokensPerSecond: number;
-  readonly capabilities = {
-    // Plain text-to-video allows 3-15 s, but image input (used for chaining) is limited to 3-10 s.
-    minSeconds: 3,
-    maxSeconds: 10,
-    aspectRatios: ['16:9', '9:16'] as ('16:9' | '9:16')[],
-    resolutions: ['360p', '720p', '1080p', '4k'],
-    defaultResolution: '720p',
-    imageToVideo: true,
-  };
+  readonly capabilities = GEMINI_CAPABILITIES;
 
   // Node's default fetch aborts if response headers take > 5 min; generation can take longer.
   private readonly dispatcher: Agent;

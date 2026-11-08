@@ -3,6 +3,9 @@ import { z } from 'zod';
 import { getBalance } from '../../db/billing.js';
 import { pool } from '../../db/pool.js';
 import { listProviders } from '../../providers/registry.js';
+import type { VideoProvider } from '../../providers/types.js';
+import { keyHint, removeUserGeminiKey, userGeminiKey } from '../../providers/user-keys.js';
+import { userProviders } from '../../services/videos.js';
 import { config } from '../../config.js';
 
 const page = z.object({
@@ -13,7 +16,13 @@ const page = z.object({
 export async function meRoutes(app: FastifyInstance) {
   app.get('/me', async (req) => {
     const user = req.user!;
-    return { id: user.id, email: user.email, balance: await getBalance(user.id) };
+    const [balance, gemini] = await Promise.all([getBalance(user.id), userGeminiKey(user.id)]);
+    return { id: user.id, email: user.email, balance, geminiKey: gemini ? { hint: keyHint(gemini) } : null };
+  });
+
+  /** Disconnects the user's own Gemini key. Their running videos stop at the next segment. */
+  app.delete('/me/gemini-key', async (req) => {
+    return { removed: await removeUserGeminiKey(req.user!.id) };
   });
 
   /** Token ledger, newest first. Paginate with ?before=<id of the last row>. */
@@ -30,13 +39,18 @@ export async function meRoutes(app: FastifyInstance) {
     return { transactions: r.rows };
   });
 
-  app.get('/providers', async () => ({
-    defaultProvider: config.DEFAULT_PROVIDER,
-    providers: listProviders().map((p) => ({
+  /** Providers this user can use: the server's, with "gemini" replaced by their own key if they added one. */
+  app.get('/providers', async (req) => {
+    const { ownGemini } = await userProviders(req.user!.id);
+    const describe = (p: VideoProvider, ownKey: boolean) => ({
       id: p.id,
+      ownKey,
       defaultModel: p.defaultModel,
       tokensPerSecond: p.tokensPerSecond,
       ...p.capabilities,
-    })),
-  }));
+    });
+    const list = listProviders().filter((p) => !(ownGemini && p.id === 'gemini')).map((p) => describe(p, false));
+    if (ownGemini) list.unshift(describe(ownGemini, true));
+    return { defaultProvider: ownGemini ? 'gemini' : config.DEFAULT_PROVIDER, providers: list };
+  });
 }

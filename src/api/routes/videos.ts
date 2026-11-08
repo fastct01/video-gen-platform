@@ -4,7 +4,7 @@ import { getBalance, tokensSpentOnVideo } from '../../db/billing.js';
 import { pool } from '../../db/pool.js';
 import { getVideo, listSegments, type VideoRow } from '../../db/repo.js';
 import { enqueueSegment } from '../../queue/queues.js';
-import { ApiError, createVideo, createVideoSchema, planVideo, videoDto } from '../../services/videos.js';
+import { ApiError, createVideo, createVideoSchema, planVideo, userProviders, videoDto } from '../../services/videos.js';
 
 const idParam = z.object({ id: z.uuid() });
 const listQuery = z.object({
@@ -16,10 +16,11 @@ export async function videoRoutes(app: FastifyInstance) {
   /** Price check without creating anything. */
   app.post('/videos/estimate', async (req) => {
     const input = createVideoSchema.parse(req.body);
-    const balance = await getBalance(req.user!.id);
-    const plan = planVideo(input, balance);
+    const [balance, user] = await Promise.all([getBalance(req.user!.id), userProviders(req.user!.id)]);
+    const plan = planVideo(input, balance, user);
     return {
       provider: plan.provider.id,
+      ownKey: plan.ownKey,
       model: plan.model,
       segmentSeconds: plan.segmentSeconds,
       segments: input.mode === 'duration' ? plan.segmentDurations.length : null,
@@ -34,7 +35,7 @@ export async function videoRoutes(app: FastifyInstance) {
 
   app.post('/videos', async (req, reply) => {
     const input = createVideoSchema.parse(req.body);
-    const { video, firstSegmentId, plan } = await createVideo(req.user!.id, input);
+    const { video, firstSegmentId, plan } = await createVideo(req.user!.id, input, await userProviders(req.user!.id));
     await enqueueSegment(firstSegmentId);
     return reply.code(201).send({ ...(await videoDto(video)), estimatedTokens: plan.estimatedTokens });
   });

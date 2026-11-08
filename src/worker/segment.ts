@@ -9,7 +9,7 @@ import { saveVideoOutput } from '../lib/http.js';
 import { errMsg } from '../lib/util.js';
 import { extractLastFrame, FfmpegError, probe } from '../media/ffmpeg.js';
 import { getProvider } from '../providers/registry.js';
-import { syncProviderSettings } from '../providers/settings.js';
+import { ownGeminiProvider } from '../providers/user-keys.js';
 import { ProviderError, type GenerateRequest, type VideoOutput, type VideoProvider } from '../providers/types.js';
 import { keys, storage } from '../storage/index.js';
 import { advance, giveUpSegment, isTerminalSegment, isTerminalVideo, stopVideo } from './control.js';
@@ -42,12 +42,14 @@ export async function processSegment(job: SegmentJob, token?: string): Promise<v
     return;
   }
 
-  let provider = getProvider(video.provider);
+  // own_key videos run on the owner's key, looked up per segment so removing the key stops the video.
+  const provider = video.own_key ? await ownGeminiProvider(video.user_id) : getProvider(video.provider);
   if (!provider) {
-    await syncProviderSettings().catch(() => {}); // a key may have been saved from the UI moments ago
-    provider = getProvider(video.provider);
+    return giveUpSegment(
+      seg.id,
+      video.own_key ? 'your Gemini key was removed — connect it again to make more videos' : `provider "${video.provider}" is not configured on this worker`,
+    );
   }
-  if (!provider) return giveUpSegment(seg.id, `provider "${video.provider}" is not configured on this worker`);
 
   if (seg.status === 'pending') {
     const amount = seg.duration_seconds * video.tokens_per_second;

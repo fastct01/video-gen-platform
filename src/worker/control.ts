@@ -8,7 +8,7 @@ import {
   setStopReason,
   type StopReason,
 } from '../db/repo.js';
-import { getProvider } from '../providers/registry.js';
+import { providerCapabilities } from '../providers/registry.js';
 import { enqueueFinalize, enqueueSegment } from '../queue/queues.js';
 
 const TERMINAL_SEGMENT = new Set(['completed', 'skipped', 'failed', 'canceled']);
@@ -36,7 +36,7 @@ export async function advance(videoId: string, completedIdx: number): Promise<vo
   if (video.cancel_requested) return stopVideo(videoId, 'canceled');
 
   const nextIdx = completedIdx + 1;
-  const minSeconds = getProvider(video.provider)?.capabilities.minSeconds ?? 1;
+  const minSeconds = providerCapabilities(video.provider)?.minSeconds ?? 1;
   const seconds = plannedSegmentSeconds(video, nextIdx, minSeconds);
   if (seconds == null) {
     const targetReached =

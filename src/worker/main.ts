@@ -6,7 +6,6 @@ import { pool } from '../db/pool.js';
 import { updateVideo } from '../db/repo.js';
 import { errMsg } from '../lib/util.js';
 import { listProviders } from '../providers/registry.js';
-import { startProviderSettingsSync } from '../providers/settings.js';
 import {
   closeQueues,
   enqueueFinalize,
@@ -22,7 +21,6 @@ import { processFinalize } from './finalize.js';
 import { processSegment } from './segment.js';
 
 await mkdir(path.resolve(config.TMP_DIR), { recursive: true });
-const stopSettingsSync = await startProviderSettingsSync();
 
 const segmentWorker = new Worker(SEGMENT_QUEUE, processSegment, {
   connection: redisConnection(),
@@ -115,7 +113,6 @@ async function shutdown(signal: string) {
   shuttingDown = true;
   console.log(`${signal}: waiting for active jobs to finish...`);
   clearInterval(reconcileTimer);
-  stopSettingsSync();
   await Promise.all([segmentWorker.close(), finalizeWorker.close()]);
   await closeQueues();
   await pool.end();

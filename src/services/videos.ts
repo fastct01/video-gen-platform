@@ -3,6 +3,7 @@ import { config } from '../config.js';
 import { withTx } from '../db/pool.js';
 import { plannedSegmentSeconds, promptForSegment, type SegmentRow, type VideoRow } from '../db/repo.js';
 import { defaultProviderId, getProvider } from '../providers/registry.js';
+import { ownGeminiProvider } from '../providers/user-keys.js';
 import type { VideoProvider } from '../providers/types.js';
 import { storage } from '../storage/index.js';
 
@@ -45,6 +46,8 @@ export type CreateVideoInput = z.infer<typeof createVideoSchema>;
 
 export interface VideoPlan {
   provider: VideoProvider;
+  /** Generated with the user's own provider key (0 tokens; the provider bills the key's owner). */
+  ownKey: boolean;
   model: string;
   aspectRatio: '16:9' | '9:16' | '1:1';
   resolution: string;
@@ -58,12 +61,33 @@ export interface VideoPlan {
   firstSegmentTokens: number;
 }
 
-/** Validates a request against the provider's capabilities and works out what it will cost. */
-export function planVideo(input: CreateVideoInput, balance?: number): VideoPlan {
-  const providerId = input.provider ?? defaultProviderId();
-  const provider = providerId ? getProvider(providerId) : undefined;
+/** Providers that exist only for this user (their own keys). */
+export interface UserProviders {
+  ownGemini: VideoProvider | null;
+}
+
+export async function userProviders(userId: string): Promise<UserProviders> {
+  return { ownGemini: await ownGeminiProvider(userId) };
+}
+
+/**
+ * Validates a request against the provider's capabilities and works out what it will cost.
+ * A user's own Gemini key takes precedence over the server's for "gemini" and is the default provider.
+ */
+export function planVideo(input: CreateVideoInput, balance?: number, user: UserProviders = { ownGemini: null }): VideoPlan {
+  const providerId = input.provider ?? (user.ownGemini ? 'gemini' : defaultProviderId());
+  const ownKey = providerId === 'gemini' && user.ownGemini != null;
+  const provider = ownKey ? user.ownGemini! : providerId ? getProvider(providerId) : undefined;
   if (!provider) {
-    throw new ApiError(400, 'unknown_provider', providerId ? `provider "${providerId}" is not available` : 'no providers are configured');
+    throw new ApiError(
+      400,
+      'unknown_provider',
+      providerId === 'gemini'
+        ? 'connect your Gemini API key to generate with Gemini'
+        : providerId
+          ? `provider "${providerId}" is not available`
+          : 'no providers are available — connect your Gemini API key',
+    );
   }
   const caps = provider.capabilities;
 
@@ -113,6 +137,7 @@ export function planVideo(input: CreateVideoInput, balance?: number): VideoPlan 
 
   return {
     provider,
+    ownKey,
     model: input.model ?? provider.defaultModel,
     aspectRatio: input.aspectRatio,
     resolution,
@@ -131,11 +156,15 @@ export function planVideo(input: CreateVideoInput, balance?: number): VideoPlan 
  * active-video limit can't be raced by parallel requests. Tokens are NOT debited here: each
  * segment reserves its own tokens right before it is generated.
  */
-export async function createVideo(userId: string, input: CreateVideoInput): Promise<{ video: VideoRow; firstSegmentId: string; plan: VideoPlan }> {
+export async function createVideo(
+  userId: string,
+  input: CreateVideoInput,
+  user: UserProviders,
+): Promise<{ video: VideoRow; firstSegmentId: string; plan: VideoPlan }> {
   return withTx(async (c) => {
     const u = await c.query<{ token_balance: number }>(`SELECT token_balance FROM users WHERE id = $1 FOR UPDATE`, [userId]);
     const balance = u.rows[0]?.token_balance ?? 0;
-    const plan = planVideo(input, balance);
+    const plan = planVideo(input, balance, user);
 
     const active = await c.query<{ n: number }>(
       `SELECT count(*)::int AS n FROM videos WHERE user_id = $1 AND status IN ('queued', 'generating', 'stitching')`,
@@ -159,8 +188,8 @@ export async function createVideo(userId: string, input: CreateVideoInput): Prom
 
     const v = await c.query<VideoRow>(
       `INSERT INTO videos (user_id, mode, prompt, segment_prompts, provider, model, aspect_ratio, resolution,
-                           segment_seconds, target_seconds, max_segments, tokens_per_second)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                           segment_seconds, target_seconds, max_segments, tokens_per_second, own_key)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING *`,
       [
         userId,
@@ -175,6 +204,7 @@ export async function createVideo(userId: string, input: CreateVideoInput): Prom
         plan.targetSeconds,
         plan.maxSegments,
         plan.tokensPerSecond,
+        plan.ownKey,
       ],
     );
     const video = v.rows[0]!;
@@ -200,6 +230,7 @@ export async function videoDto(video: VideoRow, segments?: SegmentRow[], tokensS
     prompt: video.prompt,
     segmentPrompts: video.segment_prompts,
     provider: video.provider,
+    ownKey: video.own_key,
     model: video.model,
     aspectRatio: video.aspect_ratio,
     resolution: video.resolution,

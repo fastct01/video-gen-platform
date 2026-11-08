@@ -7,10 +7,12 @@
     "node": ">=22"
   },
   "scripts": {
+    "dev": "tsx watch src/main.ts",
     "dev:api": "tsx watch src/api/main.ts",
     "dev:worker": "tsx watch src/worker/main.ts",
     "start:api": "node dist/api/main.js",
     "start:worker": "node dist/worker/main.js",
+    "start": "node dist/db/migrate.js && node dist/main.js",
     "migrate": "tsx src/db/migrate.ts",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",

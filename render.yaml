@@ -1,0 +1,57 @@
+# Render Blueprint: one web service (API + worker, Docker, ffmpeg) with a disk for videos,
+# a Postgres database and a Key Value (Redis) instance for the job queue.
+# Deploy: Render dashboard -> New -> Blueprint -> pick this repo.
+services:
+  - type: web
+    name: video-studio
+    runtime: docker
+    plan: starter            # persistent disks need a paid instance
+    healthCheckPath: /health
+    disk:
+      name: video-data
+      mountPath: /data
+      sizeGB: 10
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: video-studio-db
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: video-studio-queue
+          property: connectionString
+      - key: ADMIN_TOKEN          # shown in the dashboard (Environment tab); paste it in the UI to sign in as admin
+        generateValue: true
+      - key: URL_SIGNING_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY       # encrypts users' Gemini keys; don't change it after people have signed in
+        generateValue: true
+      - key: TRUST_PROXY
+        value: "true"
+      - key: STORAGE_DRIVER
+        value: local
+      - key: STORAGE_LOCAL_DIR
+        value: /data/storage
+      - key: TMP_DIR
+        value: /data/tmp
+      - key: DEFAULT_PROVIDER
+        value: gemini
+      - key: MOCK_PROVIDER_ENABLED
+        value: "false"
+      - key: LOCAL_USER_INITIAL_TOKENS
+        value: "0"
+      - key: GEMINI_API_KEY       # optional server-wide key; leave empty so everyone uses their own
+        sync: false
+
+  - type: keyvalue
+    name: video-studio-queue
+    plan: starter
+    maxmemoryPolicy: noeviction  # required by BullMQ: queue data must never be evicted
+    ipAllowList: []              # reachable only from your Render services
+
+databases:
+  - name: video-studio-db
+    plan: basic-256mb
+    databaseName: video
+    user: video

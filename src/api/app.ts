@@ -23,7 +23,7 @@ declare module 'fastify' {
 }
 
 export async function buildApp(opts: { logger?: boolean } = {}): Promise<FastifyInstance> {
-  const app = Fastify({ logger: opts.logger ?? true, bodyLimit: 1024 * 1024 });
+  const app = Fastify({ logger: opts.logger ?? true, bodyLimit: 1024 * 1024, trustProxy: config.TRUST_PROXY });
   app.decorateRequest('user', null);
 
   app.setErrorHandler((err, req, reply) => {

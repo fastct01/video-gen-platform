@@ -19,6 +19,7 @@ export interface VideoRow {
   target_seconds: number | null;
   max_segments: number;
   tokens_per_second: number;
+  own_key: boolean;
   cancel_requested: boolean;
   stop_reason: StopReason | null;
   final_key: string | null;

@@ -8,11 +8,16 @@ const bool = z
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
   PORT: z.coerce.number().int().default(3000),
-  PUBLIC_BASE_URL: z.string().url().default('http://localhost:3000'),
+  // On Render, RENDER_EXTERNAL_URL (e.g. https://video-studio.onrender.com) is set automatically.
+  PUBLIC_BASE_URL: z.string().url().default(process.env.RENDER_EXTERNAL_URL ?? 'http://localhost:3000'),
+  /** Set to true behind a reverse proxy / load balancer (Render, Fly, nginx) so client IPs and https are seen correctly. */
+  TRUST_PROXY: bool.default(false),
   DATABASE_URL: z.string().min(1),
   REDIS_URL: z.string().min(1),
   ADMIN_TOKEN: z.string().min(12),
   URL_SIGNING_SECRET: z.string().min(12),
+  /** Encrypts users' provider API keys at rest. Falls back to URL_SIGNING_SECRET. Changing it means users re-enter their keys. */
+  ENCRYPTION_KEY: z.string().min(16).optional().transform((v) => v || undefined),
 
   DEFAULT_PROVIDER: z.string().default('gemini'),
   GEMINI_API_KEY: z.string().optional().transform((v) => v || undefined),
@@ -20,7 +25,7 @@ const schema = z.object({
   GEMINI_BASE_URL: z.string().url().default('https://generativelanguage.googleapis.com'),
   GEMINI_TOKENS_PER_SECOND: z.coerce.number().int().min(0).default(10),
   GEMINI_REQUEST_TIMEOUT_MS: z.coerce.number().int().default(15 * 60_000),
-  /** Tokens granted once to the local UI user (created when you connect the UI with a Gemini key or the admin token). */
+  /** Tokens granted once to the admin's UI account (created the first time you sign in to the UI with ADMIN_TOKEN). */
   LOCAL_USER_INITIAL_TOKENS: z.coerce.number().int().min(0).default(1000),
   MOCK_PROVIDER_ENABLED: bool.default(false),
   MOCK_TOKENS_PER_SECOND: z.coerce.number().int().min(0).default(1),
