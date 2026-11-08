@@ -25,6 +25,62 @@ export async function meRoutes(app: FastifyInstance) {
     return { removed: await removeUserGeminiKey(req.user!.id) };
   });
 
+  /**
+   * Usage summary for the usage panel. Google doesn't let an API key read its remaining credit or quota,
+   * so this reports what was generated *on this site*: with the user's own Gemini key, and in tokens.
+   * "today" starts at midnight Pacific, when Gemini API daily quotas reset.
+   */
+  app.get('/me/usage', async (req) => {
+    const userId = req.user!.id;
+    const [windows, tokens, quota, balance, gemini] = await Promise.all([
+      pool.query<{ name: string; since: Date; videos: number; clips: number; seconds: number; rejected: number }>(
+        `WITH b AS (SELECT date_trunc('day', now() AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'America/Los_Angeles' AS today)
+         SELECT w.name, w.since, vids.n AS videos, segs.clips, segs.seconds, segs.rejected
+         FROM b, LATERAL (VALUES ('today', b.today), ('last30Days', now() - interval '30 days'), ('allTime', '-infinity'::timestamptz)) w(name, since)
+         CROSS JOIN LATERAL (
+           SELECT count(*)::int AS n FROM videos v WHERE v.user_id = $1 AND v.own_key AND v.created_at >= w.since
+         ) vids
+         CROSS JOIN LATERAL (
+           SELECT count(*) FILTER (WHERE s.status = 'completed')::int AS clips,
+                  COALESCE(sum(COALESCE(s.actual_duration_s, s.duration_seconds)) FILTER (WHERE s.status = 'completed'), 0)::float AS seconds,
+                  COALESCE(sum(s.provider_failures), 0)::int AS rejected
+           FROM segments s JOIN videos v ON v.id = s.video_id
+           WHERE v.user_id = $1 AND v.own_key AND s.updated_at >= w.since
+         ) segs`,
+        [userId],
+      ),
+      pool.query<{ today: number; last30Days: number }>(
+        `SELECT COALESCE(-sum(amount) FILTER (WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'America/Los_Angeles') AT TIME ZONE 'America/Los_Angeles'), 0)::int AS today,
+                COALESCE(-sum(amount) FILTER (WHERE created_at >= now() - interval '30 days'), 0)::int AS "last30Days"
+         FROM token_transactions WHERE user_id = $1 AND kind IN ('reserve', 'refund')`,
+        [userId],
+      ),
+      // Most recent quota / rate-limit rejection from Google in the last 24 hours.
+      pool.query<{ at: Date; error: string }>(
+        `SELECT s.updated_at AS at, s.error FROM segments s JOIN videos v ON v.id = s.video_id
+         WHERE v.user_id = $1 AND v.own_key AND s.updated_at >= now() - interval '24 hours'
+           AND s.error ~* '(HTTP 429|RESOURCE_EXHAUSTED|quota|rate limit)'
+         ORDER BY s.updated_at DESC LIMIT 1`,
+        [userId],
+      ),
+      getBalance(userId),
+      userGeminiKey(userId),
+    ]);
+    const nextReset = await pool.query<{ at: Date }>(
+      `SELECT (date_trunc('day', now() AT TIME ZONE 'America/Los_Angeles') + interval '1 day') AT TIME ZONE 'America/Los_Angeles' AS at`,
+    );
+    const ownKey = Object.fromEntries(
+      windows.rows.map((w) => [w.name, { videos: w.videos, clips: w.clips, seconds: Math.round(w.seconds), rejected: w.rejected }]),
+    );
+    return {
+      geminiKey: gemini ? { hint: keyHint(gemini) } : null,
+      ownKey,
+      quotaResetsAt: nextReset.rows[0]!.at,
+      lastQuotaError: quota.rows[0] ? { at: quota.rows[0].at, message: quota.rows[0].error.slice(0, 300) } : null,
+      tokens: { balance, spentToday: tokens.rows[0]!.today, spentLast30Days: tokens.rows[0]!.last30Days },
+    };
+  });
+
   /** Token ledger, newest first. Paginate with ?before=<id of the last row>. */
   app.get('/me/transactions', async (req) => {
     const q = page.parse(req.query);

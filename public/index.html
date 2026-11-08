@@ -238,6 +238,28 @@
   .btn.secondary:hover { background: rgba(255,255,255,.08); }
   .btn .spin { width: 14px; height: 14px; border: 2px solid rgba(0,0,0,.25); border-top-color: #000; border-radius: 50%; animation: rot .7s linear infinite; }
 
+  .usage-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+  .usage-head h2 { margin: 0; }
+  .muted-p { color: var(--muted); font-size: 13.5px; margin: 0 0 14px; }
+  .usage-key { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--text-2); margin: 4px 0 16px; }
+  .usage-key .ok { width: 7px; height: 7px; border-radius: 50%; background: #fff; box-shadow: 0 0 8px rgba(255,255,255,.8); }
+  .stat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .stat { border-radius: 16px; padding: 14px 16px; background: rgba(255,255,255,.05); border: 1px solid var(--line); }
+  .stat .big { font-size: 28px; font-weight: 500; letter-spacing: -0.02em; line-height: 1.1; }
+  .stat .lbl { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+  .usage-table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13.5px; }
+  .usage-table th, .usage-table td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--line); }
+  .usage-table th:first-child, .usage-table td:first-child { text-align: left; }
+  .usage-table th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .05em; }
+  .usage-note { margin-top: 14px; font-size: 13px; color: var(--text-2); }
+  .usage-alert { display: flex; gap: 10px; align-items: flex-start; border: 1px solid rgba(255,255,255,.4); border-radius: 14px; padding: 12px 14px; margin-bottom: 14px; font-size: 13.5px; }
+  .usage-alert svg { flex-shrink: 0; margin-top: 2px; }
+  .usage-section { margin-top: 22px; }
+  .usage-section h3 { font-size: 13px; font-weight: 500; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; }
+  .usage-links { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
+  .usage-links a { text-decoration: none; }
+  #usageDialog { width: min(560px, 94vw); }
+
   @media (max-width: 600px) {
     .hint { display: none; }
     .bar { justify-content: space-between; }
@@ -255,6 +277,10 @@
     </div>
     <div class="spacer"></div>
     <span class="chip glass" id="balance" title="Token balance" hidden></span>
+    <button class="chip glass" id="usageBtn" type="button" title="Usage" hidden>
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>
+      <span>Usage</span>
+    </button>
     <button class="chip glass" id="accountChip" type="button" title="Keys and account">
       <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="7.5" cy="15.5" r="4.5"/><path d="m10.7 12.3 9.8-9.8M17 6l3 3M14.5 8.5l2 2"/></svg>
       <span class="email" id="accountLabel">Sign in</span>
@@ -294,6 +320,14 @@
       </div>
     </div>
   </div>
+
+  <dialog id="usageDialog" class="glass" aria-labelledby="usageTitle">
+    <div class="usage-head">
+      <h2 id="usageTitle">Usage</h2>
+      <button class="icon-btn" type="button" id="usageClose" aria-label="Close">✕</button>
+    </div>
+    <div id="usageBody"><p class="muted-p">Loading…</p></div>
+  </dialog>
 
   <dialog id="keyDialog" class="glass">
     <form method="dialog" id="keyForm" autocomplete="off">
@@ -681,6 +715,7 @@
     b.textContent = `${state.balance.toLocaleString()} tokens`;
   }
   function renderAccount() {
+    $('usageBtn').hidden = !state.email;
     $('accountLabel').innerHTML = state.geminiKey
       ? `<span class="ok" title="Your Gemini key is connected"></span>Gemini key ${esc(state.geminiKey.hint)}`
       : state.email?.endsWith('@users.local') ? 'No Gemini key' // account created from a key that's since been removed
@@ -707,6 +742,63 @@
     $('empty').hidden = false;
     renderBalance(); renderAccount();
     openKeyDialog();
+  }
+
+  // ---------------- usage ----------------
+  const GOOGLE_USAGE_URL = 'https://aistudio.google.com/usage';
+  const usageDlg = $('usageDialog');
+  $('usageBtn').onclick = openUsage;
+  $('usageClose').onclick = () => usageDlg.close();
+  usageDlg.addEventListener('click', (e) => { if (e.target === usageDlg) usageDlg.close(); }); // click outside
+
+  function fmtTime(iso) {
+    return new Date(iso).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+  }
+  async function openUsage() {
+    $('usageBody').innerHTML = '<p class="muted-p">Loading…</p>';
+    if (!usageDlg.open) usageDlg.showModal();
+    try {
+      renderUsage(await api('/v1/me/usage'));
+    } catch (err) {
+      $('usageBody').innerHTML = `<p class="muted-p">${esc(cap(err.message))}</p>`;
+    }
+  }
+  function renderUsage(u) {
+    const t = u.ownKey.today, m = u.ownKey.last30Days, a = u.ownKey.allTime;
+    const row = (label, w) => `<tr><td>${label}</td><td>${w.videos}</td><td>${w.clips}</td><td>${esc(fmtDur(w.seconds) || '0s')}</td><td>${w.rejected}</td></tr>`;
+    const quota = u.lastQuotaError
+      ? `<div class="usage-alert" role="alert">${ICON.alert}<div><b>Google refused a request ${esc(fmtTime(u.lastQuotaError.at))}: your key hit its quota or rate limit.</b><br>
+         Daily limits reset ${esc(fmtTime(u.quotaResetsAt))} (midnight Pacific). Check your limits and billing on Google.</div></div>`
+      : '';
+    const showTokens = !u.geminiKey || u.tokens.balance > 0 || u.tokens.spentLast30Days > 0;
+    $('usageBody').innerHTML = `
+      ${u.geminiKey
+        ? `<div class="usage-key"><span class="ok"></span>Your Gemini key ${esc(u.geminiKey.hint)}</div>`
+        : `<p class="muted-p">You haven't added a Gemini key. Add one from the + menu to generate with your own Google account.</p>`}
+      ${quota}
+      ${u.geminiKey ? `
+        <div class="stat-grid">
+          <div class="stat"><div class="big">${esc(fmtDur(t.seconds) || '0s')}</div><div class="lbl">video generated today</div></div>
+          <div class="stat"><div class="big">${t.clips}</div><div class="lbl">clips from Google today</div></div>
+        </div>
+        <table class="usage-table">
+          <thead><tr><th></th><th>Videos</th><th>Clips</th><th>Length</th><th>Rejected</th></tr></thead>
+          <tbody>${row('Today', t)}${row('Last 30 days', m)}${row('All time', a)}</tbody>
+        </table>
+        <p class="usage-note">“Today” resets ${esc(fmtTime(u.quotaResetsAt))}, when Google resets daily limits. Each clip is one request to Google. Rejected attempts are requests Google refused (safety blocks, quota).</p>
+        <p class="usage-note">Google doesn't let apps read how much credit or quota a key has left, and this only counts videos made here. For your real remaining balance, check Google AI Studio.</p>
+        <div class="usage-links">
+          <a class="btn primary" href="${GOOGLE_USAGE_URL}" target="_blank" rel="noopener">Check remaining quota on Google ↗</a>
+        </div>` : ''}
+      ${showTokens ? `
+        <div class="usage-section">
+          <h3>Video Studio tokens</h3>
+          <div class="stat-grid">
+            <div class="stat"><div class="big">${u.tokens.balance.toLocaleString()}</div><div class="lbl">tokens left</div></div>
+            <div class="stat"><div class="big">${u.tokens.spentLast30Days.toLocaleString()}</div><div class="lbl">spent in the last 30 days (${u.tokens.spentToday.toLocaleString()} today)</div></div>
+          </div>
+          <p class="usage-note">Tokens are only used for videos made with the server's provider. Videos made with your own Gemini key cost 0 tokens.</p>
+        </div>` : ''}`;
   }
 
   // ---------------- feed ----------------
@@ -736,7 +828,10 @@
         return { dot: 'ok', text: `Done · ${fmtDur(v.durationSeconds)}`, extra: notes[v.stopReason] || '' };
       }
       case 'canceled': return { dot: '', text: 'Canceled' };
-      case 'failed': return { dot: 'bad', text: 'Failed', extra: v.error || '', error: true };
+      case 'failed': {
+        const quota = /HTTP 429|RESOURCE_EXHAUSTED|quota/i.test(v.error || '');
+        return { dot: 'bad', text: quota ? 'Failed: your Gemini key is out of quota' : 'Failed', extra: v.error || '', error: true, quota };
+      }
       default: return { dot: '', text: v.status };
     }
   }
@@ -774,6 +869,7 @@
         <span>${esc(info.text)}</span>
         ${info.extra ? (info.error ? `<span class="err">${ICON.alert}${esc(info.extra)}</span>` : `<span class="muted">· ${esc(info.extra)}</span>`) : ''}
       </div>
+      ${info.quota ? `<div class="meta-row">Google's daily limits reset at midnight Pacific. <a class="ghost-btn" href="${GOOGLE_USAGE_URL}" target="_blank" rel="noopener">Check quota on Google ↗</a></div>` : ''}
       ${active ? `<div class="progress ${pct == null ? 'indeterminate' : ''}"><i style="width:${pct ?? 30}%"></i></div>` : ''}
       ${active && v.segments?.length ? `<div class="segments">${v.segments.map((s) => `<span class="seg ${esc(s.status)}" title="Segment ${s.idx + 1}: ${esc(s.status)}"></span>`).join('')}</div>` : ''}
       ${v.downloadUrl ? `<video class="${v.aspectRatio === '9:16' ? 'portrait' : ''}" controls playsinline preload="metadata" src="${esc(v.downloadUrl)}"></video>` : ''}
